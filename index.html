@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
 <meta name="theme-color" content="#2c3e50">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="12WK Program">
 <title>12-Week Strength Program Tracker</title>
+<link rel="manifest" href="manifest.json">
 <style>
 :root{
   --blue:#3498db; --dark:#2c3e50; --red:#e74c3c; --green:#27ae60;
@@ -15,6 +18,8 @@ body{font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:var(--bg
 header{background:var(--dark);color:#fff;padding:14px 16px;position:sticky;top:0;z-index:50;}
 header h1{font-size:1.05em;margin-bottom:2px;}
 header .sub{font-size:.75em;opacity:.85;}
+.save-flash{color:#2ecc71;font-size:.7em;margin-left:6px;opacity:0;transition:opacity .3s;}
+.save-flash.show{opacity:1;}
 .wrap{max-width:700px;margin:0 auto;padding:12px;}
 .card{background:#fff;border-radius:10px;padding:14px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
 .card h2{font-size:1em;color:var(--dark);margin-bottom:10px;border-bottom:2px solid var(--blue);padding-bottom:6px;}
@@ -67,6 +72,8 @@ button{cursor:pointer;border:none;border-radius:6px;padding:10px 14px;font-size:
 .file-row{display:flex;gap:8px;}
 .file-row input[type=file]{flex:1;font-size:.8em;}
 .legend{font-size:.7em;color:#777;margin-top:6px;line-height:1.5;}
+.storage-status{font-size:.78em;padding:8px 10px;border-radius:6px;margin-bottom:10px;background:#e8f8f0;border-left:4px solid var(--green);}
+.storage-status.warn{background:#fff3cd;border-left-color:#f1c40f;}
 #errBanner{display:none;background:#c0392b;color:#fff;padding:10px 14px;font-size:.8em;position:sticky;top:0;z-index:100;white-space:pre-wrap;}
 </style>
 </head>
@@ -75,13 +82,14 @@ button{cursor:pointer;border:none;border-radius:6px;padding:10px 14px;font-size:
 <div id="errBanner"></div>
 <header>
   <h1>12-Week Strength Program</h1>
-  <div class="sub">6-Month Tracker &middot; Week <span id="hdrWeek">1</span> of 24</div>
+  <div class="sub">6-Month Tracker &middot; Week <span id="hdrWeek">1</span> of 24 <span class="save-flash" id="saveFlash">saved</span></div>
 </header>
 
 <div class="wrap">
 
   <div class="card" id="setupCard">
     <h2>1RM Setup / Recalculate</h2>
+    <div class="storage-status" id="storageStatus">Checking storage...</div>
     <p class="small" style="margin-bottom:8px;">Enter your current 1RM. Training Max = 92% of 1RM. This is only the starting point for each 4-week block &mdash; once you log real sets, later weeks in that block follow your actual performance instead.</p>
     <div class="row">
       <div class="field"><label>Deadlift 1RM (kg)</label><input type="number" id="rmDL" value="100"></div>
@@ -135,37 +143,115 @@ button{cursor:pointer;border:none;border-radius:6px;padding:10px 14px;font-size:
     <div class="legend">
       <span class="badge badge-auto">AUTO</span> = suggestion comes from Set 1 last time this exercise appeared &middot;
       <span class="badge badge-default">DEFAULT</span> = program's starting formula &middot;
-      Each set logs its own weight/reps/check. Tap the Top button once you've hit the top of the rep range &mdash; that drives next time's weight.
+      Each set logs its own weight/reps/check. Tap the Top button once you've hit the top of the rep range.
     </div>
     <div id="exerciseList"></div>
   </div>
 
   <div class="card">
-    <h2>Data &mdash; Save / Load Progress</h2>
-    <p class="small" style="margin-bottom:8px;">Entries live only in this browser tab's memory. Export a backup file regularly and re-import it whenever you reopen the app.</p>
-    <div class="btn-row"><button class="btn-green" id="btnExport">Export Progress (.json)</button></div>
+    <h2>Backup / Move Between Devices</h2>
+    <p class="small" style="margin-bottom:8px;">Everything above auto-saves to this device's storage as you go. Use Export/Import only to move progress to another device, or as an extra backup.</p>
+    <div class="btn-row"><button class="btn-green" id="btnExport">Export Backup (.json)</button></div>
     <div class="file-row" style="margin-top:8px;">
       <input type="file" id="importFile" accept="application/json">
       <button class="btn-primary btn-sm" id="btnImport">Import</button>
     </div>
-    <div class="btn-row" style="margin-top:8px;"><button class="btn-red btn-sm" id="btnReset">Reset Everything</button></div>
+    <div class="btn-row" style="margin-top:8px;"><button class="btn-red btn-sm" id="btnReset">Reset Everything (clears device storage)</button></div>
   </div>
 
 </div>
 
 <div class="footer-nav">
   <button class="btn-outline" id="btnPrevWeek2">Prev Week</button>
-  <button class="btn-primary" id="btnExport2">Save</button>
+  <button class="btn-primary" id="btnExport2">Backup</button>
   <button class="btn-outline" id="btnNextWeek2">Next Week</button>
 </div>
 
 <script>
-window.onerror = function(msg, src, line, col){
+window.onerror = function(msg, src, line){
   var b = document.getElementById('errBanner');
   b.style.display = 'block';
   b.textContent = 'Something broke: ' + msg + ' (line ' + line + ')';
   return false;
 };
+
+/* ============ STORAGE LAYER: IndexedDB, falls back to localStorage ============ */
+var AppStorage = (function(){
+  var DB_NAME='StrengthProgramDB', DB_VERSION=1, STORE='kv', KEY='app-state';
+  var mode=null, dbInstance=null;
+
+  function openDB(){
+    return new Promise(function(resolve,reject){
+      if(!('indexedDB' in window)){ reject(new Error('no-idb')); return; }
+      var req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function(){ if(!req.result.objectStoreNames.contains(STORE)) req.result.createObjectStore(STORE); };
+      req.onsuccess = function(){ resolve(req.result); };
+      req.onerror = function(){ reject(req.error); };
+    });
+  }
+  function init(){
+    return openDB().then(function(db){ dbInstance=db; mode='idb'; return mode; })
+      .catch(function(){ mode = ('localStorage' in window) ? 'ls' : 'none'; return mode; });
+  }
+  function idbPut(value){
+    return new Promise(function(resolve,reject){
+      var tx = dbInstance.transaction(STORE,'readwrite');
+      tx.objectStore(STORE).put(value, KEY);
+      tx.oncomplete = resolve;
+      tx.onerror = function(){ reject(tx.error); };
+    });
+  }
+  function idbGet(){
+    return new Promise(function(resolve,reject){
+      var tx = dbInstance.transaction(STORE,'readonly');
+      var req = tx.objectStore(STORE).get(KEY);
+      req.onsuccess = function(){ resolve(req.result); };
+      req.onerror = function(){ reject(req.error); };
+    });
+  }
+  function save(payload){
+    if(mode==='idb'){
+      return idbPut(payload).catch(function(){
+        try{ localStorage.setItem(KEY, JSON.stringify(payload)); mode='ls'; }catch(e){}
+      });
+    }
+    if(mode==='ls'){
+      try{ localStorage.setItem(KEY, JSON.stringify(payload)); }catch(e){}
+      return Promise.resolve();
+    }
+    return Promise.resolve();
+  }
+  function load(){
+    if(mode==='idb') return idbGet().then(function(v){ return v||null; }).catch(function(){ return null; });
+    if(mode==='ls'){
+      try{ var raw = localStorage.getItem(KEY); return Promise.resolve(raw?JSON.parse(raw):null); }
+      catch(e){ return Promise.resolve(null); }
+    }
+    return Promise.resolve(null);
+  }
+  function clear(){
+    var p = Promise.resolve();
+    if(mode==='idb') p = idbPut(null);
+    try{ localStorage.removeItem(KEY); }catch(e){}
+    return p;
+  }
+  return {init:init, save:save, load:load, clear:clear, mode:function(){return mode;}};
+})();
+
+var saveTimer=null, flashTimer=null;
+function schedulePersist(){
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(function(){
+    AppStorage.save(buildPayload()).then(flashSaved);
+  }, 400);
+}
+function flashSaved(){
+  var el = document.getElementById('saveFlash');
+  el.classList.add('show');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(function(){ el.classList.remove('show'); }, 1200);
+}
+function buildPayload(){ return {savedAt:new Date().toISOString(), curWeek:curWeek, curDay:curDay, state:state}; }
 
 /* ============ PROGRAM DATA ============ */
 var MAIN = {
@@ -179,7 +265,6 @@ var MAIN_PCT = {
   DL:{1:.82,2:.82,3:.85,4:.65}, SQ:{1:.82,2:.82,3:.85,4:.65}, BP:{1:.82,2:.82,3:.85,4:.65},
   OHP:{1:.85,2:.85,3:.88,4:.65}, ROW:{1:.82,2:.82,3:.85,4:.70}
 };
-
 var ACCESSORIES = {
  A:{
   mon:[['latpd','Lat Pulldown','40-50kg x 3x8-12'],['scr','Seated Cable Row','35-45kg x 3x10-12'],
@@ -348,8 +433,8 @@ function setTableHTML(log, key, numSets, repLabel){
     var wVal = (s.w===null || s.w===undefined || isNaN(s.w)) ? '' : s.w;
     html += '<tr>' +
       '<td class="idx">'+(i+1)+'</td>' +
-      '<td><input type="number" step="0.5" value="'+wVal+'" data-key="'+key+'" data-idx="'+i+'" data-field="w" class="setw"></td>' +
-      '<td><input type="text" value="'+(s.r||'')+'" data-key="'+key+'" data-idx="'+i+'" data-field="r" class="setr"></td>' +
+      '<td><input type="number" step="0.5" value="'+wVal+'" data-key="'+key+'" data-idx="'+i+'" class="setw"></td>' +
+      '<td><input type="text" value="'+(s.r||'')+'" data-key="'+key+'" data-idx="'+i+'" class="setr"></td>' +
       '<td class="chk"><button class="set-done '+(s.done?'on':'')+'" data-key="'+key+'" data-idx="'+i+'">'+(s.done?'v':'')+'</button></td>' +
       '</tr>';
   }
@@ -420,7 +505,6 @@ function render(){
     box.innerHTML = html;
     list.appendChild(box);
 
-    // wire up live warmup + preview on Set 1 weight input
     var set1Input = box.querySelector('.setw[data-idx="0"]');
     if(set1Input){
       set1Input.addEventListener('input', function(){
@@ -454,33 +538,31 @@ function render(){
     list.appendChild(box);
   });
 
-  // wire set inputs + done buttons + top buttons (event delegation on the list)
   wireExerciseList();
   renderTMTable();
 }
 
 function wireExerciseList(){
   var list = document.getElementById('exerciseList');
-  var weightInputs = list.querySelectorAll('.setw');
-  weightInputs.forEach(function(inp){
+  list.querySelectorAll('.setw').forEach(function(inp){
     inp.addEventListener('change', function(){
       var log = state.logs[this.getAttribute('data-key')];
       if(!log) return;
       var idx = parseInt(this.getAttribute('data-idx'),10);
       log.sets[idx].w = parseFloat(this.value);
+      schedulePersist();
     });
   });
-  var repInputs = list.querySelectorAll('.setr');
-  repInputs.forEach(function(inp){
+  list.querySelectorAll('.setr').forEach(function(inp){
     inp.addEventListener('change', function(){
       var log = state.logs[this.getAttribute('data-key')];
       if(!log) return;
       var idx = parseInt(this.getAttribute('data-idx'),10);
       log.sets[idx].r = this.value;
+      schedulePersist();
     });
   });
-  var doneBtns = list.querySelectorAll('.set-done');
-  doneBtns.forEach(function(btn){
+  list.querySelectorAll('.set-done').forEach(function(btn){
     btn.addEventListener('click', function(){
       var log = state.logs[this.getAttribute('data-key')];
       if(!log) return;
@@ -488,10 +570,10 @@ function wireExerciseList(){
       log.sets[idx].done = !log.sets[idx].done;
       this.classList.toggle('on', log.sets[idx].done);
       this.textContent = log.sets[idx].done ? 'v' : '';
+      schedulePersist();
     });
   });
-  var topBtns = list.querySelectorAll('[data-topkey]');
-  topBtns.forEach(function(btn){
+  list.querySelectorAll('[data-topkey]').forEach(function(btn){
     btn.addEventListener('click', function(){
       var key = this.getAttribute('data-topkey');
       var liftKey = this.getAttribute('data-topmain');
@@ -500,6 +582,7 @@ function wireExerciseList(){
       log.top = !log.top;
       this.classList.toggle('top-on', log.top);
       if(liftKey) updatePreview(liftKey, key);
+      schedulePersist();
     });
   });
 }
@@ -524,9 +607,9 @@ function renderTMTable(){
 }
 
 /* ============ NAV / EVENTS ============ */
-function changeWeek(delta){ curWeek = Math.min(24, Math.max(1, curWeek+delta)); render(); }
-function jumpWeek(v){ curWeek = parseInt(v,10); render(); }
-function setDay(d){ curDay = d; render(); }
+function changeWeek(delta){ curWeek = Math.min(24, Math.max(1, curWeek+delta)); schedulePersist(); render(); }
+function jumpWeek(v){ curWeek = parseInt(v,10); schedulePersist(); render(); }
+function setDay(d){ curDay = d; schedulePersist(); render(); }
 
 document.getElementById('btnPrevWeek').addEventListener('click', function(){ changeWeek(-1); });
 document.getElementById('btnNextWeek').addEventListener('click', function(){ changeWeek(1); });
@@ -536,14 +619,22 @@ document.getElementById('weekSlider').addEventListener('input', function(){ jump
 document.getElementById('tabMon').addEventListener('click', function(){ setDay('mon'); });
 document.getElementById('tabWed').addEventListener('click', function(){ setDay('wed'); });
 document.getElementById('tabFri').addEventListener('click', function(){ setDay('fri'); });
-document.getElementById('bwInput').addEventListener('change', function(){ state.bw[curWeek]=parseFloat(this.value)||null; });
-document.getElementById('waistInput').addEventListener('change', function(){ state.waist[curWeek]=parseFloat(this.value)||null; });
+document.getElementById('bwInput').addEventListener('change', function(){ state.bw[curWeek]=parseFloat(this.value)||null; schedulePersist(); });
+document.getElementById('waistInput').addEventListener('change', function(){ state.waist[curWeek]=parseFloat(this.value)||null; schedulePersist(); });
 
 document.getElementById('showSetupBtn').addEventListener('click', toggleSetup);
 document.getElementById('btnHideSetup').addEventListener('click', toggleSetup);
 function toggleSetup(){
   var c=document.getElementById('setupCard'); var btn=document.getElementById('showSetupBtn');
   var hidden=c.classList.toggle('hidden'); btn.style.display = hidden?'inline-block':'none';
+}
+
+function syncSetupInputs(){
+  document.getElementById('rmDL').value = state.baseRM.DL;
+  document.getElementById('rmSQ').value = state.baseRM.SQ;
+  document.getElementById('rmBP').value = state.baseRM.BP;
+  document.getElementById('rmOHP').value = state.baseRM.OHP;
+  document.getElementById('rmROW').value = state.baseRM.ROW;
 }
 
 document.getElementById('btnApplyRM').addEventListener('click', function(){
@@ -563,13 +654,13 @@ document.getElementById('btnApplyRM').addEventListener('click', function(){
     Object.keys(newRM).forEach(function(l){ state.tmOverrides[l][info.blockIndex] = roundTo(newRM[l]*0.92,2.5); });
   }
   render();
+  AppStorage.save(buildPayload()).then(flashSaved);
   alert('Recalculated from Week '+week+' onward.');
 });
 
 /* ============ EXPORT / IMPORT ============ */
 function exportData(){
-  var payload = {savedAt:new Date().toISOString(), curWeek:curWeek, curDay:curDay, state:state};
-  var blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+  var blob = new Blob([JSON.stringify(buildPayload(),null,2)], {type:'application/json'});
   var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='strength-program-progress.json'; a.click();
 }
 document.getElementById('btnExport').addEventListener('click', exportData);
@@ -583,28 +674,51 @@ document.getElementById('btnImport').addEventListener('click', function(){
     try{
       var payload = JSON.parse(e.target.result);
       state = payload.state; curWeek = payload.curWeek||1; curDay = payload.curDay||'mon';
-      document.getElementById('rmDL').value = state.baseRM.DL;
-      document.getElementById('rmSQ').value = state.baseRM.SQ;
-      document.getElementById('rmBP').value = state.baseRM.BP;
-      document.getElementById('rmOHP').value = state.baseRM.OHP;
-      document.getElementById('rmROW').value = state.baseRM.ROW;
+      syncSetupInputs();
       render();
-      alert('Progress loaded from '+(payload.savedAt||'file'));
+      AppStorage.save(buildPayload()).then(flashSaved);
+      alert('Progress loaded and saved to this device.');
     }catch(err){ alert('Could not read that file: '+err.message); }
   };
   reader.readAsText(f);
 });
 
 document.getElementById('btnReset').addEventListener('click', function(){
-  if(!confirm('This clears all logged sets, weights, reps, and bodyweight/waist entries. Continue?')) return;
+  if(!confirm('This clears all logged sets and entries from this device\'s storage. Continue?')) return;
   state = {baseRM:{DL:100,SQ:75,BP:87,OHP:48,ROW:50}, tmOverrides:{DL:{},SQ:{},BP:{},OHP:{},ROW:{}}, logs:{}, bw:{}, waist:{}};
-  curWeek=1; curDay='mon'; render();
+  curWeek=1; curDay='mon';
+  syncSetupInputs();
+  AppStorage.clear();
+  render();
 });
 
-/* ============ INIT ============ */
-document.getElementById('setupCard').classList.add('hidden');
-document.getElementById('showSetupBtn').style.display='inline-block';
-render();
+/* ============ BOOT ============ */
+function boot(){
+  AppStorage.init().then(function(mode){
+    var statusEl = document.getElementById('storageStatus');
+    if(mode==='idb'){ statusEl.textContent = 'Auto-saving to IndexedDB on this device.'; }
+    else if(mode==='ls'){ statusEl.textContent = 'Auto-saving to localStorage on this device.'; statusEl.classList.add('warn'); }
+    else { statusEl.textContent = 'No browser storage available - use Export after every session.'; statusEl.classList.add('warn'); }
+    return AppStorage.load();
+  }).then(function(saved){
+    if(saved && saved.state){
+      state = saved.state;
+      curWeek = saved.curWeek || 1;
+      curDay = saved.curDay || 'mon';
+    }
+    syncSetupInputs();
+    document.getElementById('setupCard').classList.add('hidden');
+    document.getElementById('showSetupBtn').style.display='inline-block';
+    render();
+  });
+}
+boot();
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('service-worker.js').catch(function(){});
+  });
+}
 </script>
 </body>
 </html>

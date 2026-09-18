@@ -1,4 +1,4 @@
-const CACHE = 'strength-v1';
+const CACHE = 'strength-v2';
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(['./', './index.html', './manifest.json'])));
 });
